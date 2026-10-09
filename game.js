@@ -1,0 +1,789 @@
+"use strict";
+
+/* ============================================================
+   SPECIAL MEDICINE — combined edition
+   Game 2's exploration and story, with Little Horrors' sprites and objectives.
+   ============================================================ */
+const ART = {
+  shuu:   { pal:{hair:'#2b2535', coat:'#161a22', skin:'#f0dcc0', leg:'#141317', shoe:'#5a5a5f'} },
+  madoka: { pal:{hair:'#5e2739', coat:'#3a2a22', skin:'#f0dcc0', leg:'#5b82c4', shoe:'#e8d6bd'} }
+};
+const DIR={down:0, up:1, right:2, left:3};
+
+const W=320,H=180;
+const cv=document.getElementById('c'), X=cv.getContext('2d');
+const tx=document.getElementById('t'), TX=tx.getContext('2d');
+X.imageSmoothingEnabled=false;
+
+let SCALE=1;
+function fit(){
+  const available=Math.min((innerWidth-16)/W,(innerHeight-76)/H);
+  SCALE=available>=1 ? Math.floor(available) : Math.max(0.25,available);
+  cv.style.width=(W*SCALE)+'px'; cv.style.height=(H*SCALE)+'px';
+  tx.width=W*SCALE; tx.height=H*SCALE;
+  tx.style.width=(W*SCALE)+'px'; tx.style.height=(H*SCALE)+'px';
+  TX.setTransform(SCALE,0,0,SCALE,0,0);
+  TX.font='8px "Courier New", Courier, monospace';
+  TX.textBaseline='alphabetic';
+}
+addEventListener('resize',fit); fit();
+
+/* ---------------- audio ---------------- */
+let AC=null, muted=false, drone=null;
+function ac(){ if(!AC){ try{AC=new (window.AudioContext||window.webkitAudioContext)();}catch(e){} } return AC; }
+function unlockAudio(){
+  if(muted) return;
+  const context=ac();
+  if(context && context.state==='suspended') context.resume().catch(()=>{});
+}
+function toggleMute(){
+  muted=!muted;
+  const button=document.getElementById('mute');
+  button.textContent=muted?'Sound: off (M)':'Sound: on (M)';
+  button.setAttribute('aria-pressed',String(muted));
+  if(muted){
+    droneOff();
+    if(AC) AC.suspend().catch(()=>{});
+  } else {
+    unlockAudio();
+    if(hallu>0) droneOn();
+  }
+}
+document.getElementById('mute').addEventListener('click',toggleMute);
+function tone(f,dur,type,vol,slide){
+  if(muted||!ac())return;
+  const o=AC.createOscillator(), g=AC.createGain();
+  o.type=type||'square'; o.frequency.value=f;
+  if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(20,slide),AC.currentTime+dur);
+  g.gain.value=(vol||0.05); g.gain.exponentialRampToValueAtTime(0.0001,AC.currentTime+dur);
+  o.connect(g).connect(AC.destination); o.start(); o.stop(AC.currentTime+dur);
+}
+function noise(dur,vol,lp){
+  if(muted||!ac())return;
+  const n=Math.floor(AC.sampleRate*dur), b=AC.createBuffer(1,n,AC.sampleRate), d=b.getChannelData(0);
+  for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*(1-i/n);
+  const s=AC.createBufferSource(); s.buffer=b;
+  const f=AC.createBiquadFilter(); f.type='lowpass'; f.frequency.value=lp||900;
+  const g=AC.createGain(); g.gain.value=vol||0.12;
+  s.connect(f).connect(g).connect(AC.destination); s.start();
+}
+function blip(){ tone(620+Math.random()*90,0.03,'square',0.022); }
+function thud(){ tone(70,0.35,'sine',0.16,28); noise(0.22,0.10,500); }
+function droneOn(){ if(muted||!ac()||drone)return;
+  const o=AC.createOscillator(), g=AC.createGain(), f=AC.createBiquadFilter();
+  o.type='sawtooth'; o.frequency.value=41; g.gain.value=0.0001;
+  f.type='lowpass'; f.frequency.value=180;
+  o.connect(f).connect(g).connect(AC.destination); o.start();
+  g.gain.exponentialRampToValueAtTime(0.06, AC.currentTime+2.5);
+  drone={o,g};
+}
+function droneOff(){ if(!drone)return; const d=drone; drone=null;
+  try{ d.g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime+1.0);
+       d.o.stop(AC.currentTime+1.2);}catch(e){} }
+
+/* ---------------- input ---------------- */
+const keys={};
+let onConfirm=null, choice=null, mash=null;
+const CONFIRM=['KeyZ','Space','Enter','KeyE'];
+addEventListener('keydown',e=>{
+  if(e.target instanceof HTMLButtonElement && (e.code==='Space'||e.code==='Enter')) return;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',...CONFIRM].includes(e.code)) e.preventDefault();
+  unlockAudio();
+  keys[e.code]=true;
+  if(e.code==='KeyM'){ if(!e.repeat) toggleMute(); return; }
+  if(mash){ if(CONFIRM.includes(e.code) && !e.repeat) mash.hits++; return; }
+  if(e.repeat) return;
+  if(choice){
+    if(e.code==='ArrowUp'||e.code==='KeyW'){ choice.i=(choice.i+choice.opts.length-1)%choice.opts.length; blip(); }
+    if(e.code==='ArrowDown'||e.code==='KeyS'){ choice.i=(choice.i+1)%choice.opts.length; blip(); }
+    if(CONFIRM.includes(e.code)){ const c=choice; choice=null; dlg=null; tone(500,.06,'square',.04); c.res(c.i); }
+    return;
+  }
+  if(CONFIRM.includes(e.code)){
+    if(onConfirm){ const f=onConfirm; onConfirm=null; f(); return; }
+    if(roam && !lock){ tryInteract(); return; }
+  }
+});
+addEventListener('keyup',e=>{ keys[e.code]=false; });
+function clearKeys(){ for(const code of Object.keys(keys)) delete keys[code]; }
+addEventListener('blur',clearKeys);
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) clearKeys(); });
+document.getElementById('stage').addEventListener('pointerdown',()=>{
+  unlockAudio();
+  if(screen==='title' && onConfirm){ const confirm=onConfirm; onConfirm=null; confirm(); }
+});
+
+/* ---------------- text ---------------- */
+function wrap(t,max){
+  const out=[];
+  t.split('\n').forEach(par=>{
+    let line='';
+    par.split(' ').forEach(w=>{
+      const test=line?line+' '+w:w;
+      if(TX.measureText(test).width>max && line){ out.push(line); line=w; } else line=test;
+    });
+    out.push(line);
+  });
+  return out;
+}
+let dlg=null;
+function say(who,text,opt){
+  opt=opt||{};
+  return new Promise(res=>{
+    const lines=wrap(text,278);
+    dlg={who:who||'', lines, n:0, total:lines.join('').length,
+         speed:opt.speed||1.6, col:opt.col||'#e8e5ee'};
+    announce((who?who+': ':'')+text);
+    const step=()=>{
+      if(dlg && dlg.n < dlg.total){ dlg.n=dlg.total; onConfirm=step; }
+      else { dlg=null; res(); }
+    };
+    onConfirm=step;
+  });
+}
+function choose(text,opts){
+  return new Promise(res=>{
+    dlg={who:'',lines:wrap(text,278),n:9999,total:9999,speed:2,col:'#e8e5ee'};
+    choice={opts,i:0,res};
+    announce(text+' '+opts.join(' / '));
+  });
+}
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+
+/* ---------------- tweens ---------------- */
+const tweens=[];
+function tw(set,from,to,ms){ return new Promise(r=>tweens.push({set,from,to,ms,t:0,r})); }
+function stepTweens(dt){
+  for(let i=tweens.length-1;i>=0;i--){
+    const t=tweens[i]; t.t+=dt;
+    const k=Math.min(1,t.t/t.ms);
+    t.set(t.from+(t.to-t.from)*k);
+    if(k>=1){ tweens.splice(i,1); t.r(); }
+  }
+}
+
+/* ---------------- state ---------------- */
+let fade=1, hallu=0, flash=0, shake=0;
+let roam=false, lock=false, roamRes=null, cutscene=false;
+let loopN=1, hasMed=false, sawGun=false;
+let objective='Check on Madoka.', screen='loading';
+let room='kids';
+const player={x:170,y:140,dir:DIR.left,hidden:false,moving:false,walkTime:0};
+let actors=[], bloodT=0, madokaState='bed', showEndText=null;
+function setFade(v){fade=v;}
+const D=()=>loopN-1;
+function announce(text){ document.getElementById('status').textContent=text; }
+function setObjective(text){ objective=text; if(text) announce(text); }
+
+/* ---------------- draw helpers ---------------- */
+function px(c,x,y,w,h){ X.fillStyle=c; X.fillRect(x|0,y|0,Math.ceil(w),Math.ceil(h)); }
+function drawSheet(key,x,y,h,dir){
+  const moving=key==='shuu' && player.moving && roam && !lock && !dlg;
+  if(!GameSprites.draw(X,key,x,y,h,dir,moving,player.walkTime)) fallbackChar(ART[key].pal,x,y,h,dir);
+}
+function fallbackChar(p,x,y,h,dir){
+  const w=Math.round(h*0.62), l=Math.round(x-w/2);
+  px(p.leg,l+2,y-h*0.30,w-4,h*0.24);
+  px(p.shoe,l+2,y-4,w-4,4);
+  px(p.coat,l,y-h*0.66,w,h*0.38);
+  px(p.skin,l+3,y-h*0.76,w-6,h*0.12);
+  px(p.hair,l+1,y-h,w-2,h*0.30);
+  if(dir!==DIR.up){ px('#22223a',l+4,y-h*0.72,2,2); px('#22223a',l+w-6,y-h*0.72,2,2); }
+}
+function silhouette(x,y,h,hairCol,coatCol,skinCol,dark){
+  const w=Math.round(h*0.58), l=Math.round(x-w/2);
+  px('#0a0a10',l+2,y-h*0.32,w-4,h*0.32);
+  px(dark?'#0d0d14':coatCol,l,y-h*0.68,w,h*0.38);
+  px(dark?'#101018':skinCol,l+3,y-h*0.78,w-6,h*0.12);
+  px(dark?'#0a0a10':hairCol,l+1,y-h,w-2,h*0.28);
+}
+function floorboards(y,h,col){ X.fillStyle=col; for(let x=0;x<W;x+=18) X.fillRect(x,y,1,h); }
+function doorway(x){ px('#0f0c13',x,52,14,50); px('#0f0c13',x,102,14,8); }
+function dustify(level){
+  if(level<=0) return;
+  X.globalAlpha=0.10*level; px('#8a8272',0,0,W,H);
+  X.globalAlpha=0.35*level;
+  for(let i=0;i<70;i++) px('#6f6a60',(i*77+loopN*13)%W,(i*53)%H,1,1);
+  X.globalAlpha=1;
+}
+
+/* ---------------- rooms ---------------- */
+function drawKids(){
+  px('#3b3340',0,0,W,100); px('#2a242f',0,96,W,6);
+  px('#4a3a34',0,102,W,78); floorboards(102,78,'#3f312c');
+  [[104,22,22,18],[130,26,20,16],[154,20,18,20]].forEach((p,i)=>{
+    px(D()?'#ccc3ae':'#efe7d2',p[0],p[1],p[2],p[3]);
+    px(i%2?'#9c4a5e':'#4a6c9c',p[0]+3,p[1]+4,p[2]-8,2);
+    px('#6b8f5a',p[0]+3,p[1]+9,p[2]-6,2);
+    px('#c0a23a',p[0]+4,p[1]+13,4,3);
+  });
+  px('#4a3328',12,78,78,10); px('#3a2820',12,86,78,22);
+  px('#d9cdb6',18,88,64,9);
+  if(madokaState==='bed'){
+    drawSheet('madoka',35,109,32,DIR.right);
+  }
+  px(D()?'#5c3a46':'#7a3a52',18,97,64,11);
+  px('#4d3a5e',196,92,34,24); px('#3a2c48',196,92,34,4);
+  px('#c7a34a',200,100,6,6); px('#b04a5e',210,102,6,4);
+  px('#1a1620',248,36,48,68); px('#3d3244',248,38,48,66); px('#241e2c',272,38,2,66);
+  px('#c0b070',268,68,2,2); px('#c0b070',276,68,2,2);
+  if(sawGun) px('#22222a',252,92,14,5);
+  doorway(306);
+  if(bloodT>0){
+    X.globalAlpha=Math.min(1,bloodT);
+    px('#4a0e18',150,124,40,14); px('#4a0e18',188,130,28,10);
+    px('#320a12',216,134,34,6); px('#320a12',246,136,18,4);
+    X.globalAlpha=1;
+  }
+  dustify(D()*0.9);
+}
+function drawHall(){
+  px('#332e3a',0,0,W,100); px('#231f29',0,96,W,6);
+  px('#3d352f',0,102,W,78); floorboards(102,78,'#342d28');
+  [[54,26,26,22],[88,30,22,18],[186,24,24,20],[216,30,20,16]].forEach((f,i)=>{
+    px('#2a2028',f[0]-2,f[1]-2,f[2]+4,f[3]+4);
+    const empty = D()>0 && (i===0||i===2);
+    px(empty?'#191521':'#cfc6b4',f[0],f[1],f[2],f[3]);
+    if(!empty){ px('#8a7d6d',f[0]+2,f[1]+2,f[2]-4,f[3]-8);
+      px('#5e2739',f[0]+5,f[1]+5,4,5); px('#3a2b2b',f[0]+12,f[1]+4,4,6); }
+  });
+  px('#2a1f19',138,34,32,68); px('#3a2c22',140,36,28,64); px('#c9b06a',163,70,3,3);
+  px('#2f2a34',268,98,18,4); px('#4a4450',275,56,3,42);
+  if(D()>0){ px('#3a3340',262,42,30,2); px('#2a2430',266,44,22,10); px('#1a1620',272,54,10,4); }
+  else { px('#c9b97f',262,40,30,16); px('#e8dca8',266,42,22,12); px('#fff6c8',274,54,6,4); }
+  doorway(0); doorway(306);
+  dustify(D()*0.9);
+}
+function drawKitchen(){
+  px('#2f3a38',0,0,W,100); px('#202a28',0,96,W,6);
+  px('#413b33',0,102,W,78); floorboards(102,78,'#38332c');
+  px('#3a3a3a',0,72,206,8); px('#4a453c',0,80,206,24);
+  px('#2c2c2c',40,74,34,5);
+  px('#3f3226',108,14,70,46); px('#4c3d2e',110,16,32,42);
+  px(hasMed?'#1a1410':'#4c3d2e',144,16,32,42);
+  px('#c9b06a',139,36,3,3); px('#c9b06a',145,36,3,3);
+  if(hasMed){ px('#3a2a18',150,30,6,16); px('#2a1c10',158,34,5,12); }
+  px('#9a9a94',210,32,42,72); px('#86867f',210,60,42,2);
+  px('#cfc6b4',216,38,18,14); px('#4a6c9c',218,42,12,2); px('#9c4a5e',218,46,8,2);
+  px('#6a6a64',246,52,3,10);
+  px('#1e2422',28,36,12,16); px('#333b38',30,38,8,7); px('#1e2422',34,52,2,10);
+  px('#4a3a2c',28,132,74,6); px('#3a2c22',32,138,5,16);
+  px('#3a2c22',94,138,5,16);
+  doorway(0);
+  dustify(D()*0.9);
+}
+const ROOMS={
+  kids:{draw:drawKids,
+        solid:[[0,0,W,104],[12,78,78,30],[196,92,34,24],[248,36,48,68]],
+        exits:{east:'hall'}},
+  hall:{draw:drawHall,
+        solid:[[0,0,W,104],[138,34,32,70]],
+        exits:{east:'kitchen', west:'kids'}},
+  kitchen:{draw:drawKitchen,
+        solid:[[0,0,W,104],[0,72,206,34],[210,32,42,74],[28,132,74,24]],
+        exits:{west:'hall'}}
+};
+
+/* ---------------- interactables (floor-level zones) ---------------- */
+function objects(){
+  if(cutscene) return [];
+  const O=[];
+  if(room==='kids'){
+    O.push({zone:[14,108,84,26], use:useMadoka});
+    O.push({zone:[102,108,72,24], use:async()=>{
+      await say('','[Drawings. Cats, dogs, a robot with too many arms.]');
+      await say('','"TO NEE-CHAN!" is written on the biggest one.');
+      if(loopN>1) await say('SHUU','...He draws better than me.');
+    }});
+    O.push({zone:[192,118,44,24], use:async()=>{
+      await say('','[A toy box. Mostly bears with the stuffing loved out of them.]');
+    }});
+    O.push({zone:[244,108,56,26], use:async()=>{
+      if(loopN===1){ await say('','[The closet. Coats, boxes, the smell of dust.]'); return; }
+      sawGun=true;
+      await say('','[Behind the boxes there is a metal case. It is not locked.]');
+      await say('SHUU','...Papa\'s.');
+      const c=await choose('Take it somewhere she can\'t reach?',['Take it','Leave it']);
+      if(c===0){
+        await say('','[You get both hands under it.]');
+        await say('','[It does not move. You are seven.]');
+        await say('SHUU','...Okay.');
+      } else await say('SHUU','...Papa said never. So it\'s fine.');
+    }});
+  }
+  if(room==='hall'){
+    O.push({zone:[42,108,90,26], use:async()=>{
+      if(D()>0){ await say('','[Two of the photographs have been taken out of their frames.]');
+                 await say('','[The dust shows exactly where they were.]'); }
+      else { await say('','[A birthday. Madoka is a toddler, looking up at her uncle, not at the cake.]');
+             await say('SHUU','She always looks the wrong way in pictures.'); }
+    }});
+    O.push({zone:[134,108,44,26], use:async()=>{
+      await say('','[Mama\'s room. The door is shut.]');
+      await say('SHUU','...She said not to wake her up before three.');
+      if(loopN>1) await say('SHUU','(She wouldn\'t know what to do anyway. She\'d make it about her.)',{col:'#9a94a6'});
+    }});
+    O.push({zone:[256,108,44,26], use:async()=>{
+      if(D()>0){ await say('','[The lamp is broken. Someone kicked it, a long time from now.]'); return; }
+      await say('','[A standing lamp. The shade is on crooked.]');
+      await say('','[On the back of the shade: crayon. A crude anime face.]');
+      await say('SHUU','...Madoka did that. Don\'t tell.');
+    }});
+  }
+  if(room==='kitchen'){
+    O.push({zone:[100,108,86,28], use:useCabinet});
+    O.push({zone:[204,108,58,26], use:async()=>{
+      await say('','[On the fridge: a drawing signed "Yuutaro". It is a terrible robot.]');
+      await say('','[Inside: rations. Tinned everything. Nothing for a fever.]');
+    }});
+    O.push({zone:[12,108,54,24], use:async()=>{
+      await say('','[The telephone.]');
+      if(loopN===1) await say('SHUU','...Who do you even call.');
+      else { await say('','[You lift the receiver. Static, and under it, something that breathes.]');
+             noise(0.5,0.06,1400);
+             await say('SHUU','...Hello? Hello.');
+             await say('','[No one has ever answered this phone.]'); }
+    }});
+  }
+  return O;
+}
+function nearObj(){
+  for(const o of objects()){
+    const z=o.zone;
+    if(player.x>z[0]-6 && player.x<z[0]+z[2]+6 && player.y>z[1]-10 && player.y<z[1]+z[3]+10) return o;
+  }
+  return null;
+}
+function tryInteract(){
+  const o=nearObj();
+  if(!o) return;
+  lock=true; tone(480,.05,'square',.04);
+  Promise.resolve(o.use()).then(()=>{ if(!cutscene) lock=false; });
+}
+
+/* ---------------- key interactions ---------------- */
+async function useMadoka(){
+  if(!hasMed){
+    if(loopN===1){
+      await say('MADOKA','...Shuu-niisan.');
+      await say('MADOKA','It\'s so hot. Cough— ...it\'s so hot in here.');
+      await say('SHUU','Do you want water?');
+      await say('MADOKA','I had water.');
+      await say('','[Her face is wet. She is shaking under the blanket.]');
+      await say('SHUU','(Mama has a special medicine in the kitchen cabinet.)',{col:'#aaa4b6'});
+      await say('SHUU','(She drinks it when she feels bad. Then she feels better.)',{col:'#aaa4b6'});
+    } else {
+      await say('MADOKA','What\'s the matter... cough...');
+      await say('SHUU','...');
+      await say('MADOKA','I don\'t think there\'s anything you can do about this.');
+      await say('MADOKA','...Shuu-niisan. Do you hate me?');
+      await say('SHUU','...No.');
+      await say('MADOKA','But Aunt Ikue—');
+      await say('SHUU','...It\'s okay. Maybe I can find you some medicine.');
+      await say('','[You could stay here. You could sit on the floor and just stay here.]',{col:'#9a94a6'});
+    }
+    setObjective('Find the special medicine in the kitchen.');
+    return;
+  }
+  roam=false; lock=true;
+  setObjective('');
+  if(roamRes){ const r=roamRes; roamRes=null; r(); }
+}
+async function useCabinet(){
+  if(hasMed){ await say('SHUU','I\'ve got it. I\'ve got it already.'); return; }
+  await say('','[The cabinet over the counter. You have to climb to reach it.]');
+  await say('','[Bottles. Most of them are empty.]');
+  await say('','[One at the back is still half full. Brown glass. No label you can read.]');
+  if(loopN===1){
+    await say('SHUU','This is the one. This is the special medicine.');
+  } else {
+    const c=await choose('Take the medicine?',['YES','NO']);
+    if(c===1){
+      await say('SHUU','...No. Not this. I know what this is now.');
+      await wait(700);
+      await say('','[But I\'m just a kid.]',{col:'#9a94a6'});
+      await wait(500);
+      await say('','[...So I take it anyway.]',{col:'#9a94a6'});
+    } else await say('SHUU','This is the one. This is the special medicine.');
+  }
+  hasMed=true; tone(700,.08,'triangle',.05); await wait(90); tone(900,.12,'triangle',.05);
+  setObjective('Bring the medicine to Madoka.');
+  await say('','[ GOT: SPECIAL MEDICINE ]',{col:'#e8d48a'});
+  await say('SHUU','(Take it back to her.)',{col:'#aaa4b6'});
+}
+
+/* ---------------- mash ---------------- */
+function mashPrompt(label,ms,ceiling,notes){
+  return new Promise(res=>{ mash={label,ms,t:0,hits:0,v:0,ceiling,notes,note:0,res}; });
+}
+function stepMash(dt){
+  if(!mash)return;
+  mash.t+=dt;
+  if(mash.hits){ mash.v+=mash.hits*0.085; tone(300+mash.v*400,.03,'square',.03); mash.hits=0; }
+  mash.v-=dt*0.00042;
+  if(mash.v>mash.ceiling){ mash.v=mash.ceiling;
+    if(Math.random()<0.02) mash.note=Math.min(mash.notes.length-1,mash.note+1); }
+  if(mash.v<0) mash.v=0;
+  if(mash.t>=mash.ms){ const m=mash; mash=null; m.res(); }
+}
+
+/* ---------------- movement ---------------- */
+function solidAt(x,y){
+  for(const s of ROOMS[room].solid)
+    if(x>s[0]&&x<s[0]+s[2]&&y>s[1]&&y<s[1]+s[3]) return true;
+  return false;
+}
+function movePlayer(dt){
+  player.moving=false;
+  if(!roam||lock||dlg||mash) return;
+  const sp=dt*0.055; let dx=0,dy=0;
+  if(keys.ArrowLeft||keys.KeyA){dx-=1;player.dir=DIR.left;}
+  if(keys.ArrowRight||keys.KeyD){dx+=1;player.dir=DIR.right;}
+  if(keys.ArrowUp||keys.KeyW){dy-=1;if(!dx)player.dir=DIR.up;}
+  if(keys.ArrowDown||keys.KeyS){dy+=1;if(!dx)player.dir=DIR.down;}
+  if(dx&&dy){dx*=0.7071;dy*=0.7071;}
+  const previousX=player.x, previousY=player.y;
+  let nx=player.x+dx*sp, ny=Math.max(108,Math.min(174,player.y+dy*sp));
+  if(!solidAt(nx,player.y)) player.x=nx;
+  if(!solidAt(player.x,ny)) player.y=ny;
+  const ex=ROOMS[room].exits;
+  if(ex.east && player.x>313){ room=ex.east; player.x=10; tone(260,.07,'sine',.05); }
+  else if(ex.west && player.x<7){ room=ex.west; player.x=312; tone(260,.07,'sine',.05); }
+  player.x=Math.max(6,Math.min(314,player.x));
+  player.moving=player.x!==previousX || player.y!==previousY;
+  if(player.moving) player.walkTime+=dt/1000;
+  else player.walkTime=0;
+}
+
+/* ---------------- render ---------------- */
+function render(){
+  if(screen!=='play'){ drawTitle(); return; }
+  X.save();
+  if(shake>0) X.translate(Math.round((Math.random()*2-1)*shake),Math.round((Math.random()*2-1)*shake));
+  ROOMS[room].draw();
+  for(const a of actors) silhouette(a.x,a.y,a.h,a.hair,a.coat,a.skin,hallu>0.45);
+  if(room==='kids' && (madokaState==='standing'||madokaState==='gun')){
+    drawSheet('madoka',52,140,42,DIR.right);
+    if(madokaState==='gun') px('#1c1c22',61,128,10,3);
+  }
+  if(room==='kids' && madokaState==='knelt') drawSheet('madoka',150,152,34,DIR.down);
+  if(!player.hidden) drawSheet('shuu',player.x,player.y,36,player.dir);
+  X.restore();
+
+  if(hallu>0){
+    X.globalCompositeOperation='saturation';
+    X.fillStyle='rgba(128,128,128,'+Math.min(1,hallu)+')'; X.fillRect(0,0,W,H);
+    X.globalCompositeOperation='source-over';
+    X.globalAlpha=0.30*hallu; px('#000010',0,0,W,H);
+    X.globalAlpha=0.18*hallu; for(let y=0;y<H;y+=2) px('#000',0,y,W,1);
+    X.globalAlpha=1;
+  }
+  const g=X.createRadialGradient(W/2,H/2,40,W/2,H/2,190);
+  g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,0,0.75)');
+  X.fillStyle=g; X.fillRect(0,0,W,H);
+  X.globalAlpha=0.06;
+  for(let i=0;i<110;i++) px(Math.random()<0.5?'#fff':'#000',Math.random()*W|0,Math.random()*H|0,1,1);
+  X.globalAlpha=1;
+  if(flash>0){ X.globalAlpha=Math.min(1,flash); px('#fff',0,0,W,H); X.globalAlpha=1; }
+
+  drawBoxes();
+  TX.clearRect(0,0,W,H);
+  drawObjective();
+  drawText();
+  if(fade>0){ X.globalAlpha=Math.min(1,fade); px('#000',0,0,W,H); X.globalAlpha=1;
+              TX.globalAlpha=Math.min(1,fade); TX.fillStyle='#000'; TX.fillRect(0,0,W,H); TX.globalAlpha=1; }
+  if(showEndText) drawEnd();
+}
+function boxGeom(){
+  const lines=dlg?dlg.lines.length:0;
+  const extra=choice?choice.opts.length:0;
+  const speaker=dlg&&dlg.who?1:0;
+  const bh=14+(lines+extra+speaker)*10;
+  return {by:H-bh-5, bh};
+}
+function drawBoxes(){
+  if(mash){
+    const bw=150, bx=(W-bw)/2, by=100;
+    px('#000',bx-5,by-16,bw+10,34);
+    px('#2a2630',bx,by,bw,8);
+    px('#b0364a',bx+1,by+1,Math.max(0,(bw-2)*Math.min(1,mash.v)),6);
+    px('#4a4450',bx+bw*mash.ceiling,by-1,1,10);
+    return;
+  }
+  if(!dlg) return;
+  const {by,bh}=boxGeom();
+  px('#000',6,by,W-12,bh);
+  px('#3a3444',6,by,W-12,1); px('#3a3444',6,by+bh-1,W-12,1);
+  px('#3a3444',6,by,1,bh); px('#3a3444',W-7,by,1,bh);
+}
+function drawObjective(){
+  if(!roam || cutscene || dlg || mash) return;
+  TX.fillStyle='rgba(8,7,12,0.88)'; TX.fillRect(6,5,W-12,29);
+  TX.font='7px "Courier New", Courier, monospace';
+  TX.fillStyle='#ab98ad';
+  const names={kids:'BEDROOM',hall:'HALL',kitchen:'KITCHEN'};
+  TX.fillText(names[room]+' / MORNING '+loopN,12,15);
+  if(hasMed){
+    TX.textAlign='right'; TX.fillStyle='#e8d48a'; TX.fillText('MEDICINE',W-12,15); TX.textAlign='left';
+  }
+  TX.font='8px "Courier New", Courier, monospace';
+  TX.fillStyle='#e0d7df'; TX.fillText(objective,12,27);
+  TX.font='7px "Courier New", Courier, monospace';
+  TX.fillStyle='#c1b0c7';
+  if(ROOMS[room].exits.west) TX.fillText('< '+names[ROOMS[room].exits.west],9,H-6);
+  if(ROOMS[room].exits.east){
+    TX.textAlign='right'; TX.fillText(names[ROOMS[room].exits.east]+' >',W-9,H-6); TX.textAlign='left';
+  }
+  TX.font='8px "Courier New", Courier, monospace';
+}
+function drawText(){
+  if(mash){
+    const bw=150, by=100;
+    TX.textAlign='center';
+    TX.fillStyle='#e8e5ee'; TX.fillText(mash.label,W/2,by-5);
+    if(mash.v>=mash.ceiling-0.02){ TX.fillStyle='#9a94a6'; TX.fillText(mash.notes[mash.note],W/2,by+17); }
+    TX.textAlign='left'; return;
+  }
+  if(!dlg){
+    if(roam&&!lock&&nearObj()){
+      TX.textAlign='center'; TX.fillStyle='#d6cfe2';
+      TX.fillText('[Z]',Math.round(player.x),Math.round(player.y)-42); TX.textAlign='left';
+    }
+    return;
+  }
+  const {by}=boxGeom();
+  let shown=Math.floor(dlg.n), yy=by+13;
+  if(dlg.who){ TX.fillStyle='#9a94a6'; TX.fillText(dlg.who+':',12,yy); yy+=10; }
+  for(const ln of dlg.lines){
+    const take=Math.max(0,Math.min(ln.length,shown));
+    TX.fillStyle=dlg.col; TX.fillText(ln.slice(0,take),12,yy);
+    shown-=ln.length; yy+=10;
+  }
+  if(choice){
+    choice.opts.forEach((o,i)=>{
+      TX.fillStyle = i===choice.i ? '#e8d48a' : '#7a7488';
+      TX.fillText((i===choice.i?'> ':'  ')+o, 20, yy+i*10);
+    });
+  } else if(dlg.n>=dlg.total && Math.floor(performance.now()/420)%2===0){
+    TX.fillStyle='#e8d48a'; TX.fillText('\u25BE',W-20,H-11);
+  }
+}
+function drawEnd(){
+  px('#000',0,0,W,H);
+  TX.clearRect(0,0,W,H);
+  TX.textAlign='center';
+  TX.fillStyle='#ded8e6'; TX.fillText(showEndText.a,W/2,H/2-2);
+  if(showEndText.b){ TX.fillStyle='#7a7488'; TX.fillText(showEndText.b,W/2,H/2+16); }
+  if(showEndText.prompt && Math.floor(performance.now()/500)%2===0){
+    TX.fillStyle='#e8d48a'; TX.fillText('[Z]',W/2,H-24);
+  }
+  TX.textAlign='left';
+}
+
+/* ---------------- loop ---------------- */
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(50,now-last); last=now;
+  stepTweens(dt); stepMash(dt); movePlayer(dt);
+  if(dlg && dlg.n<dlg.total){
+    const before=Math.floor(dlg.n);
+    dlg.n+=dt*0.055*dlg.speed;
+    if(Math.floor(dlg.n)>before && Math.floor(dlg.n)%2===0) blip();
+    if(dlg.n>dlg.total) dlg.n=dlg.total;
+  }
+  if(flash>0) flash-=dt*0.004;
+  if(shake>0) shake=Math.max(0,shake-dt*0.01);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ============================================================
+   SCRIPT
+   ============================================================ */
+async function title(){
+  await GameSprites.ready;
+  screen='title';
+  announce('Special Medicine. Press Z or Enter, or click the game, to begin.');
+  await new Promise(res=>{ onConfirm=res; });
+  clearKeys();
+  screen='play';
+  fade=1;
+}
+function drawTitle(){
+  px('#09080e',0,0,W,H);
+  px('#14101b',48,34,224,126);
+  px('#322637',48,34,224,1); px('#322637',48,159,224,1);
+  drawSheet('shuu',W/2,132,40,DIR.down);
+  const gradient=X.createRadialGradient(W/2,100,15,W/2,100,155);
+  gradient.addColorStop(0,'rgba(0,0,0,0)'); gradient.addColorStop(1,'rgba(0,0,0,.65)');
+  X.fillStyle=gradient; X.fillRect(0,0,W,H);
+  TX.clearRect(0,0,W,H); TX.textAlign='center';
+  TX.fillStyle='#dccddd'; TX.fillText('S P E C I A L   M E D I C I N E',W/2,57);
+  TX.fillStyle='#a192aa'; TX.fillText('L I T T L E   H O R R O R S',W/2,73);
+  TX.fillStyle='#e8d48a';
+  if(screen==='loading') TX.fillText('Loading sprites...',W/2,148);
+  else if(Math.floor(performance.now()/600)%2===0) TX.fillText('[Z / ENTER] BEGIN  ·  or click',W/2,148);
+  TX.fillStyle='#928099'; TX.fillText('A bad morning. Then the same morning.',W/2,173);
+  TX.textAlign='left';
+}
+
+async function theEvent(){
+  cutscene=true; lock=true; player.hidden=false;
+  player.moving=false; setObjective('');
+  room='kids'; player.x=104; player.y=136; player.dir=DIR.left;
+  await say('SHUU','I found it. The special medicine.');
+  await say('SHUU','Mama has it when she feels bad. Then she feels better.');
+  await say('MADOKA','...It smells funny.');
+  await say('SHUU','You have to drink all of it. That\'s the rule.');
+  await wait(400);
+  await say('MADOKA','Nn. ...Thank you, Shuu-niisan.');
+  hasMed=false;
+  await wait(800);
+
+  droneOn();
+  await tw(v=>hallu=v,0,0.55,3000);
+  await say('MADOKA','...The room is moving.');
+  await say('MADOKA','Why is the room moving, why is it—');
+  madokaState='standing'; shake=1.2;
+  await say('','[She is out of bed. She should not be able to stand.]');
+  await tw(v=>hallu=v,0.55,0.9,2400);
+
+  noise(0.4,0.08,600);
+  await say('','[Downstairs: the front door.]');
+  await say('','[Three sets of feet. One of them is running.]');
+  actors=[
+    {x:330,y:142,h:44,hair:'#3a2b2b',coat:'#4a3b52',skin:'#e8cfae'},
+    {x:354,y:148,h:42,hair:'#5e2739',coat:'#6a4a5e',skin:'#f0dcc0'},
+    {x:376,y:154,h:28,hair:'#5e2739',coat:'#c7a34a',skin:'#f0dcc0'}
+  ];
+  await tw(v=>{actors[0].x=v; actors[1].x=v+24; actors[2].x=v+46;},330,236,2600);
+  madokaState='gun'; tone(180,0.2,'square',0.06);
+  await say('MADOKA','Who is that.');
+  await say('MADOKA','WHO IS THAT. Shuu-niisan, there\'s people in the house—');
+  await say('','[You know who it is. You can see them from here.]',{col:'#9a94a6'});
+
+  await mashPrompt('MASH [Z] TO SHOUT', 5200, 0.62,
+    ['...','your mouth is open','nothing is in it','she is seven','say it say it say it']);
+  await say('','[Your mouth is open. That\'s all it is. Open.]',{col:'#9a94a6'});
+
+  for(let i=0;i<3;i++){
+    flash=1.4; shake=3.2; thud();
+    await wait(180);
+    if(actors[i]){ actors[i].h=6; actors[i].y+=2; }
+    bloodT=Math.min(1,(i+1)/3);
+    await wait(i===2?900:620);
+  }
+  droneOff(); await wait(1200);
+  await tw(v=>hallu=v,0.9,0,2600);
+  actors=[
+    {x:236,y:144,h:8,hair:'#3a2b2b',coat:'#4a3b52',skin:'#e8cfae'},
+    {x:262,y:148,h:8,hair:'#5e2739',coat:'#6a4a5e',skin:'#f0dcc0'},
+    {x:286,y:152,h:6,hair:'#5e2739',coat:'#c7a34a',skin:'#f0dcc0'}
+  ];
+  madokaState='knelt';
+  await wait(900);
+  await say('MADOKA','...Papa?');
+  await wait(500);
+  await say('MADOKA','Mama. Mama, get up, I—');
+  await wait(700);
+  await say('MADOKA','Yuu-kun.');
+  await wait(1100);
+  await say('MADOKA','Yuu-kun, I\'m sorry, I\'m sorry, I\'m sorry, I\'m—');
+  await wait(600);
+  await say('MADOKA','...I did it.');
+  await say('MADOKA','Shuu-niisan. You saw. You were right there.');
+  await say('MADOKA','...Say something. Please say something.');
+  await mashPrompt('MASH [Z] TO SPEAK', 7000, 0.55,
+    ['...','it was me','the cabinet','if I say it out loud it\'s real',
+     'then I\'m the one','she\'ll never look at me again']);
+  await wait(600);
+  await say('','[You say nothing.]',{col:'#9a94a6'});
+  await wait(1400);
+  await tw(setFade,0,1,2600);
+  actors=[]; madokaState='bed'; bloodT=0;
+}
+
+async function epilogue(){
+  room='hall'; player.hidden=true; lock=true; cutscene=true;
+  const oldDraw=ROOMS.hall.draw;
+  ROOMS.hall.draw=()=>{
+    px('#1a1620',0,0,W,H);
+    px('#241e2a',0,0,W,96); px('#2c2530',0,96,W,84);
+    px('#3a3040',40,40,70,56); px('#5a4a5e',44,44,62,48);
+    silhouette(200,146,64,'#4a2030','#2a2430','#d8c0a8',false);
+    drawSheet('shuu',122,152,36,DIR.right);
+  };
+  await tw(setFade,1,0,2000);
+  await wait(700);
+  await say('SHUU','Mama.');
+  await say('SHUU','I gave Madoka the medicine. The one in the kitchen cabinet.');
+  await say('SHUU','She was sick in bed, and it\'s what you take when you feel bad, so I—');
+  await wait(600);
+  await say('IKUE','Oh, sweetheart.');
+  await say('IKUE','That\'s not your fault. This is what happened to you.');
+  await say('SHUU','But if I hadn\'t given it to her, none of it would have happened.');
+  await say('IKUE','Don\'t tell anybody about that. They wouldn\'t understand it like I do.');
+  await say('IKUE','You\'re a smart boy. You don\'t need to dwell on things like that.');
+  await wait(500);
+  await say('IKUE','That was your father\'s doing, too. If he\'d taken the time to teach you,');
+  await say('IKUE','it wouldn\'t have come around to him, would it.');
+  await say('IKUE','If he had listened to me, it would just be the three of us.');
+  await say('IKUE','And he\'d still be alive.');
+  await wait(1200);
+  await tw(setFade,0,1,2200);
+  ROOMS.hall.draw=oldDraw; player.hidden=false;
+  await wait(900);
+  showEndText={a:'Am I a good boy...?',b:''};
+  await wait(2600);
+  showEndText={a:'GAME  END',b:'',prompt:true};
+}
+
+async function finalEnd(){
+  showEndText={a:'Am I too passive...?',b:''}; await wait(2400);
+  showEndText={a:'Am I too... stupid?',b:''}; await wait(2400);
+  showEndText={a:'Mama tells me I\'m a genius.',b:''}; await wait(2000);
+  showEndText={a:'...I must be.',b:''}; await wait(2600);
+  showEndText=null;
+  loopN=6; room='kids'; madokaState='none'; bloodT=0.35; player.hidden=true;
+  cutscene=true; fade=1;
+  await tw(setFade,1,0,4000);
+  await wait(5000);
+  await tw(setFade,0,1,4000);
+  showEndText={a:'SPECIAL  MEDICINE',b:'thank you for playing'};
+  roam=false; lock=true; onConfirm=null;
+}
+
+async function runLoop(n){
+  loopN=n; hasMed=false; sawGun=false; room='kids'; madokaState='bed'; bloodT=0;
+  setObjective('Check on Madoka.'); clearKeys();
+  player.x=170; player.y=140; player.dir=DIR.left; player.hidden=false;
+  player.moving=false; player.walkTime=0;
+  lock=true; roam=false; flash=0; shake=0;
+  actors=[]; hallu=0; showEndText=null; cutscene=false; fade=1;
+  await tw(setFade,1,0,2200);
+  await wait(400);
+  lock=true;
+  await say('','[Your cousin has been coughing since yesterday.]');
+  if(n===1){
+    await say('','[Aunt Ikue is asleep. Everyone else is out getting rations.]');
+    await say('','[It is just you.]');
+  } else {
+    await say('','[You have done this before. You remember doing this before.]',{col:'#9a94a6'});
+  }
+  lock=false; roam=true;
+  await new Promise(r=>{ roamRes=r; });
+  roam=false;
+  await theEvent();
+  await epilogue();
+}
+
+async function main(){
+  await title();
+  await runLoop(1);
+  await new Promise(r=>{ onConfirm=r; });
+  await runLoop(2);
+  await new Promise(r=>{ onConfirm=r; });
+  await finalEnd();
+}
+main();
