@@ -1,5 +1,12 @@
 # Special Medicine
 
+## Play on GitHub Pages
+
+The `Deploy site to GitHub Pages` workflow publishes the game files when changes
+are pushed to `main`. In the repository's **Settings → Pages**, set **Build and
+deployment → Source** to **GitHub Actions**. After the workflow succeeds, play at
+https://bleppybee.github.io/site-assets/.
+
 index.html in this folder to play the combined version. No install or local server is needed. Keep files together so  browser can find the artwork bbygirl.
 
 The combined game uses **Game 2's gameplay**: room exploration, object inspection, dialogue, choices, timed button-mashing sequences, and the full two-morning story and ending. It adds Shuu and Madoka's directional sprite sheets from the Little Horrors index version, animated walking, objectives, room labels, and a medicine indicator. All that jazz.
